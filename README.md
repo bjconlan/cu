@@ -34,3 +34,7 @@ cu_http_response_t *r = cu_http_fetch(&tr, &req, NULL, 0);
 ```
 
 See the file header for the full build command.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
