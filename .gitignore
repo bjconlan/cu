@@ -1,0 +1,19 @@
+# Pi coding agent local config
+.pi/
+
+# Cosmopolitan build artifacts
+*.o
+*.a
+*.dbg
+*.elf
+*.ape
+*.com
+cu-test
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
