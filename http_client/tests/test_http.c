@@ -217,7 +217,6 @@ static int do_fetch(int port, void *ud) {
   cu_http_transport_t t;
   cu_http_request_t req;
   (void)ud;
-
   ctx.fd = client_connect(port);
   if (ctx.fd < 0)
     return -1;
@@ -250,7 +249,6 @@ static int do_fetch_chunked(int port, void *ud) {
   cu_http_transport_t t;
   cu_http_request_t req;
   (void)ud;
-
   ctx.fd = client_connect(port);
   if (ctx.fd < 0)
     return -1;
@@ -283,7 +281,6 @@ static int do_fetch_unframed(int port, void *ud) {
   cu_http_transport_t t;
   cu_http_request_t req;
   (void)ud;
-
   ctx.fd = client_connect(port);
   if (ctx.fd < 0)
     return -1;
@@ -318,7 +315,6 @@ static int do_keepalive(int port, void *ud) {
   cu_http_transport_t t;
   cu_http_request_t req;
   (void)ud;
-
   ctx.fd = client_connect(port);
   if (ctx.fd < 0)
     return -1;
@@ -363,7 +359,6 @@ static int do_large(int port, void *ud) {
   cu_http_transport_t t;
   cu_http_request_t req;
   (void)ud;
-
   ctx.fd = client_connect(port);
   if (ctx.fd < 0)
     return -1;
@@ -410,7 +405,6 @@ static int do_fetch_headers(int port, void *ud) {
   };
   cu_http_request_t req;
   (void)ud;
-
   ctx.fd = client_connect(port);
   if (ctx.fd < 0)
     return -1;
@@ -448,7 +442,6 @@ static int do_fetch_resp_headers(int port, void *ud) {
   cu_http_header_t rhdrs[8];
   int found_ct = 0, found_len = 0, i;
   (void)ud;
-
   ctx.fd = client_connect(port);
   if (ctx.fd < 0)
     return -1;
@@ -481,6 +474,103 @@ TEST test_response_headers(void) {
   PASS();
 }
 
+/* sans-IO: feed a response one byte at a time; assert the event sequence
+ * matches a whole-buffer feed. This is the property SSE streaming
+ * depends on (arbitrarily split reads). */
+static void collect_events(const char *resp, size_t resp_len, int split,
+                           int *status, char *body, size_t *body_len,
+                           size_t *n_events) {
+  cu_http_parser_t p;
+  cu_http_parser_init(&p, 1); /* kHttpResponse */
+  size_t fed = 0;
+  *n_events = 0;
+  *body_len = 0;
+  *status = 0;
+  while (fed < resp_len) {
+    size_t chunk = 1;
+    if (split > 1) {
+      chunk = (size_t)split;
+      if (chunk > resp_len - fed)
+        chunk = resp_len - fed;
+    }
+    cu_http_parser_feed(&p, resp + fed, chunk);
+    fed += chunk;
+    for (;;) {
+      cu_http_event_t ev = cu_http_parser_next(&p);
+      if (ev == CU_HTTP_EV_NEED_MORE)
+        break;
+      if (ev == CU_HTTP_EV_ERROR)
+        return;
+      (*n_events)++;
+      if (ev == CU_HTTP_EV_HEADERS)
+        *status = cu_http_parser_status(&p);
+      if (ev == CU_HTTP_EV_BODY) {
+        size_t blen;
+        const char *b = cu_http_parser_body(&p, &blen);
+        memcpy(body + *body_len, b, blen);
+        *body_len += blen;
+      }
+      if (ev == CU_HTTP_EV_DONE)
+        goto done;
+    }
+  }
+  /* drain remaining events after EOF */
+  for (;;) {
+    cu_http_event_t ev = cu_http_parser_next(&p);
+    if (ev == CU_HTTP_EV_NEED_MORE)
+      break;
+    if (ev == CU_HTTP_EV_ERROR)
+      break;
+    (*n_events)++;
+    if (ev == CU_HTTP_EV_DONE)
+      break;
+  }
+done:
+  cu_http_parser_destroy(&p);
+}
+
+TEST test_incremental_split(void) {
+  const char *resp =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/plain\r\n"
+      "Content-Length: 12\r\n"
+      "\r\n"
+      "hello world!";
+  char body1[64], body2[64];
+  size_t bl1 = 0, bl2 = 0, ne1 = 0, ne2 = 0;
+  int st1 = 0, st2 = 0;
+  collect_events(resp, strlen(resp), 0, &st1, body1, &bl1, &ne1);
+  collect_events(resp, strlen(resp), 1, &st2, body2, &bl2, &ne2);
+  ASSERT_EQ(st1, st2);
+  ASSERT_EQ(200, st1);
+  ASSERT_EQ((int)bl1, (int)bl2);
+  ASSERT_EQ(12, (int)bl1);
+  ASSERT(memcmp(body1, body2, bl1) == 0);
+  ASSERT(memcmp(body1, "hello world!", 12) == 0);
+  /* byte-at-a-time must emit the same body and reach DONE */
+  ASSERT(ne1 >= 2); /* HEADERS + BODY + DONE */
+  PASS();
+}
+
+TEST test_incremental_chunked_split(void) {
+  const char *resp =
+      "HTTP/1.1 200 OK\r\n"
+      "Transfer-Encoding: chunked\r\n"
+      "\r\n"
+      "6\r\nhello \r\n7\r\nchunked\r\n0\r\n\r\n";
+  char body1[64], body2[64];
+  size_t bl1 = 0, bl2 = 0, ne1 = 0, ne2 = 0;
+  int st1 = 0, st2 = 0;
+  collect_events(resp, strlen(resp), 0, &st1, body1, &bl1, &ne1);
+  collect_events(resp, strlen(resp), 1, &st2, body2, &bl2, &ne2);
+  ASSERT_EQ(200, st1);
+  ASSERT_EQ(13, (int)bl1);
+  ASSERT(memcmp(body1, "hello chunked", 13) == 0);
+  ASSERT(memcmp(body1, body2, bl1) == 0);
+  ASSERT(ne1 >= 2);
+  PASS();
+}
+
 SUITE(http_suite) {
   RUN_TEST(test_framed);
   RUN_TEST(test_chunked);
@@ -489,4 +579,6 @@ SUITE(http_suite) {
   RUN_TEST(test_large_body);
   RUN_TEST(test_custom_headers);
   RUN_TEST(test_response_headers);
+  RUN_TEST(test_incremental_split);
+  RUN_TEST(test_incremental_chunked_split);
 }
