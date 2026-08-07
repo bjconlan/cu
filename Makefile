@@ -28,11 +28,11 @@ BEARSSL_OBJS := $(patsubst $(BEARSSL_DIR)/%.c,build/bearssl/%.o,$(BEARSSL_SRCS))
 # cu components
 TLS_SRCS := tls/src/tls.c
 TLS_OBJS := $(TLS_SRCS:.c=.o)
-HTTP_SRCS := http_client/src/http_client.c
+HTTP_SRCS := http_client/src/http_client.c http_client/src/sse.c
 HTTP_OBJS := $(HTTP_SRCS:.c=.o)
 CU_OBJS := $(TLS_OBJS) $(HTTP_OBJS)
 
-TEST_SRCS := test_main.c tls/tests/test_tls.c http_client/tests/test_http.c
+TEST_SRCS := test_main.c tls/tests/test_tls.c http_client/tests/test_http.c http_client/tests/test_sse.c
 TEST_OBJS := $(TEST_SRCS:.c=.o)
 TEST := cu-test
 

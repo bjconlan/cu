@@ -7,6 +7,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "cu/http_client.h"
+#include "cu/sse.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -571,6 +572,143 @@ TEST test_incremental_chunked_split(void) {
   PASS();
 }
 
+/* SSE integration: drive the sans-IO HTTP parser to BODY events, feed
+ * them to the SSE parser, collect events. Proves the two-parser
+ * pipeline over a real loopback connection. */
+static int do_sse_stream(int port, void *ud) {
+  fd_ctx_t ctx;
+  cu_http_transport_t t;
+  cu_http_request_t req;
+  cu_http_parser_t hp;
+  cu_sse_parser_t sp;
+  cu_sse_event_t evs[8];
+  size_t nev = 0;
+  char tmp[4096];
+  (void)ud;
+
+  ctx.fd = client_connect(port);
+  if (ctx.fd < 0)
+    return -1;
+  t.read = fd_read;
+  t.write = fd_write;
+  t.ctx = &ctx;
+  memset(&req, 0, sizeof req);
+  req.method = "GET";
+  req.path = "/";
+  req.host = "x";
+  req.keep_alive = true; /* stream: hold the connection */
+
+  /* send the request */
+  {
+    char head[1024];
+    /* reuse request_write indirectly via a manual send of a simple GET */
+    (void)head;
+    const char *g = "GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n";
+    const char *p = g;
+    size_t left = strlen(g);
+    while (left) {
+      ssize_t n = t.write(t.ctx, p, left);
+      if (n <= 0) {
+        close(ctx.fd);
+        return -1;
+      }
+      p += n;
+      left -= (size_t)n;
+    }
+  }
+
+  cu_http_parser_init(&hp, CU_HTTP_RESPONSE);
+  cu_sse_parser_init(&sp);
+
+  /* drive: pump HTTP parser; on BODY feed the SSE parser; collect */
+  int done = 0;
+  while (!done) {
+    cu_http_event_t ev = cu_http_parser_next(&hp);
+    if (ev == CU_HTTP_EV_ERROR)
+      break;
+    if (ev == CU_HTTP_EV_NEED_MORE) {
+      ssize_t n = t.read(t.ctx, tmp, sizeof tmp);
+      if (n == 0) {
+        /* EOF: drain the final BODY (unframed) then stop */
+        ev = cu_http_parser_next(&hp);
+        if (ev == CU_HTTP_EV_BODY) {
+          size_t blen;
+          const char *b = cu_http_parser_body(&hp, &blen);
+          if (blen) {
+            cu_sse_parser_feed(&sp, b, blen);
+            while (cu_sse_parser_next(&sp) && nev < 8)
+              cu_sse_parser_event(&sp, &evs[nev++]);
+          }
+        }
+        done = 1;
+        break;
+      }
+      if (n < 0)
+        break;
+      cu_http_parser_feed(&hp, tmp, (size_t)n);
+      continue;
+    }
+    if (ev == CU_HTTP_EV_HEADERS)
+      continue;
+    if (ev == CU_HTTP_EV_BODY) {
+      size_t blen;
+      const char *b = cu_http_parser_body(&hp, &blen);
+      if (blen) {
+        cu_sse_parser_feed(&sp, b, blen);
+        while (cu_sse_parser_next(&sp) && nev < 8) {
+          cu_sse_parser_event(&sp, &evs[nev]);
+          evs[nev].data = strdup(evs[nev].data);
+          nev++;
+        }
+      }
+    }
+    if (ev == CU_HTTP_EV_DONE)
+      done = 1;
+  }
+  /* drain any remaining SSE events after EOF */
+  while (cu_sse_parser_next(&sp) && nev < 8) {
+    cu_sse_parser_event(&sp, &evs[nev]);
+    evs[nev].data = strdup(evs[nev].data);
+    nev++;
+  }
+
+  /* copy SSE data out before the parsers are destroyed */
+  {
+    char d0[16], d1[16], d2[16];
+    memcpy(d0, evs[0].data, evs[0].data_len < 15 ? evs[0].data_len : 15);
+    memcpy(d1, evs[1].data, evs[1].data_len < 15 ? evs[1].data_len : 15);
+    memcpy(d2, evs[2].data, evs[2].data_len < 15 ? evs[2].data_len : 15);
+    d0[evs[0].data_len < 15 ? evs[0].data_len : 15] = 0;
+    d1[evs[1].data_len < 15 ? evs[1].data_len : 15] = 0;
+    d2[evs[2].data_len < 15 ? evs[2].data_len : 15] = 0;
+
+    cu_http_parser_destroy(&hp);
+    cu_sse_parser_destroy(&sp);
+    close(ctx.fd);
+
+    if (nev != 3)
+      return -1;
+    if (strcmp(d0, "{\"a\":1}") != 0)
+      return -1;
+    if (strcmp(d1, "{\"b\":2}") != 0)
+      return -1;
+    if (strcmp(d2, "[DONE]") != 0)
+      return -1;
+  }
+  return 0;
+}
+
+TEST test_sse_over_http(void) {
+  resp_script_t s = {
+      "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+      "data: {\"a\":1}\n\n"
+      "data: {\"b\":2}\n\n"
+      "data: [DONE]\n\n",
+      1};
+  ASSERT(with_server(&s, 1, do_sse_stream, NULL) == 0);
+  PASS();
+}
+
 SUITE(http_suite) {
   RUN_TEST(test_framed);
   RUN_TEST(test_chunked);
@@ -581,4 +719,5 @@ SUITE(http_suite) {
   RUN_TEST(test_response_headers);
   RUN_TEST(test_incremental_split);
   RUN_TEST(test_incremental_chunked_split);
+  RUN_TEST(test_sse_over_http);
 }

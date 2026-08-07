@@ -7,10 +7,13 @@ Reusable cosmopolitan wire-layer components, built with cosmocc.
   fd) and `cu_tls_connect(host, port, cfg)` (owns the fd). Caller-owned
   context (`CU_TLS_CONTEXT(n)`), system CA bundle trust anchors, session
   resumption, poll-composable engine.
-- **`http_client/`** — `cu/http_client.h`: HTTP/1.1 codec over a generic
-  read/write transport (zero TLS knowledge — HTTPS is HTTP through a TLS
-  transport). Cosmo parsing (`ParseHttpMessage`/`Unchunk`/`GetHttpHeader`),
-  exact framing (keep-alive), caller-owned k/v header arrays.
+- **`http_client/`** — `cu/http_client.h` + `cu/sse.h`: HTTP/1.1 codec
+  over a generic read/write transport (zero TLS knowledge — HTTPS is HTTP
+  through a TLS transport) plus a sans-IO Server-Sent Events parser.
+  Cosmo parsing (`ParseHttpMessage`/`Unchunk`/`GetHttpHeader`), exact
+  framing (keep-alive), caller-owned k/v header arrays. The SSE parser
+  consumes the HTTP parser's BODY events to emit complete events
+  (data/event/id/retry).
 
 BearSSL is a pinned git submodule at `third_party/bearssl` (`7bea48e5`).
 
@@ -62,6 +65,20 @@ For the common buffer-the-body case, `cu_http_fetch` drives the parser to
 
 ```c
 cu_http_response_t *r = cu_http_fetch(&tr, &req, NULL, 0);
+```
+
+**SSE streaming:** drive the HTTP parser to BODY events and feed them to
+the SSE parser (event pointers valid until the next event read):
+
+```c
+cu_sse_parser_t sp;
+cu_sse_parser_init(&sp);
+/* for each HTTP BODY chunk: */
+cu_sse_parser_feed(&sp, chunk, len);
+while (cu_sse_parser_next(&sp)) {
+  cu_sse_event_t ev;
+  cu_sse_parser_event(&sp, &ev);   /* ev.data / ev.event / ev.id */
+}
 ```
 
 `cu_http_request_t.keep_alive` (default false) sends `Connection: close`;
