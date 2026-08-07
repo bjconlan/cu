@@ -92,7 +92,7 @@ make lib                      # build/libcu.a
 make test                     # cu-test (tls + http_client suites)
 ```
 
-## Example
+## Examples
 
 `examples/example_https.c` — `GET https://example.com/` wired through both
 layers explicitly:
@@ -103,7 +103,10 @@ cu_http_transport_t tr = { tls_read, tls_write, tls };
 cu_http_response_t *r = cu_http_fetch(&tr, &req, NULL, 0);
 ```
 
-See the file header for the full build command.
+`examples/example_sse.c` — the HTTP -> SSE parser pipeline: feed a
+text/event-stream response to the HTTP parser, take its BODY events, feed
+them to the SSE parser, pull complete events. Self-contained (simulated
+bytes — no network). See the file header for the build command.
 
 ## License
 
